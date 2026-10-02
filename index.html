@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>인생네컷</title>
+<title>포토부스</title>
 <style>
   :root{--bg:#111;--fg:#fff;--accent:#ff4f8b}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -18,8 +18,8 @@
   /* camera */
   #cam{padding:0;justify-content:flex-start;background:#000}
   .stage{position:relative;width:100%;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
-  video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
-  #guide{position:absolute;inset:0;pointer-events:none}
+  video{display:none}
+  #live{width:100%;height:100%;object-fit:contain}
   #count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:140px;font-weight:800;text-shadow:0 4px 24px rgba(0,0,0,.6);pointer-events:none}
   #flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .35s}
   .bar{width:100%;padding:12px 16px calc(12px + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:center;gap:14px;background:#000}
@@ -34,8 +34,8 @@
 <body>
 
 <section id="intro" class="screen on">
-  <h1>📸 인생네컷</h1>
-  <p>4장을 연속으로 찍어 프레임에 담아드려요</p>
+  <h1>📸 포토부스</h1>
+  <p>프레임이 적용된 모습을 보면서 찍어보세요</p>
   <button id="start">시작하기</button>
   <div id="msg0" style="margin-top:14px;font-size:13px;color:#ff9;"></div>
 </section>
@@ -43,12 +43,11 @@
 <section id="cam" class="screen">
   <div class="stage">
     <video id="v" playsinline muted autoplay></video>
-    <canvas id="guide"></canvas>
+    <canvas id="live"></canvas>
     <div id="count"></div>
     <div id="flash"></div>
   </div>
   <div class="bar">
-    <div id="thumbs"><i></i><i></i><i></i><i></i></div>
     <button id="shot" aria-label="촬영"></button>
   </div>
 </section>
@@ -66,8 +65,8 @@
 /* ============ 설정 ============ */
 const CFG = {
   frameSrcs: ['frame.png','frame.jpg'], // 같은 폴더의 프레임 이미지
-  cols: 2, rows: 2,        // 사진 배치 (2x2 = 4컷)
-  gap: 14,                 // 사진 사이 간격(px)
+  cols: 1, rows: 1,        // 사진 배치 (1x1 = 1컷)
+  gap: 0,                  // 사진 사이 간격(px)
   countdown: 3,
   mirror: true,            // 셀카처럼 좌우반전 저장
   bgColor: '#000000'       // 프레임 뒤 배경색
@@ -76,8 +75,7 @@ const CFG = {
 
 const $ = id => document.getElementById(id);
 const show = id => document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id));
-let stream, frameCanvas, win, slots = [], shots = [], busy = false, resultBlob;
-const N = CFG.cols * CFG.rows;
+let stream, frameCanvas, win, slots = [], busy = false, resultBlob;
 
 function loadImg(src){
   return new Promise(res => {
@@ -139,63 +137,53 @@ async function openCam(){
   }
 }
 
-// 가이드: 슬롯 비율에 맞는 영역 표시(어두운 마스크)
-function drawGuide(){
-  const st = document.querySelector('.stage'), g = $('guide');
-  g.width = st.clientWidth; g.height = st.clientHeight;
-  const ctx = g.getContext('2d'), s = slots[0], r = s.w/s.h;
-  let w = g.width*0.96, h = w/r;
-  if(h > g.height*0.96){ h = g.height*0.96; w = h*r; }
-  const x = (g.width-w)/2, y = (g.height-h)/2;
-  ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0,0,g.width,g.height);
-  ctx.clearRect(x,y,w,h);
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(x,y,w,h);
-}
-
-// 현재 영상에서 슬롯 비율로 중앙 크롭하여 캡처
-function capture(){
-  const v = $('v'), s = slots[shots.length];
-  const vr = v.videoWidth / v.videoHeight, sr = s.w / s.h;
+// 영상을 슬롯 비율로 중앙 크롭해서 g의 (x,y,w,h)에 그림
+function drawVideo(g, x, y, w, h){
+  const v = $('v'); if(!v.videoWidth) return;
+  const vr = v.videoWidth / v.videoHeight, sr = w / h;
   let sw, sh, sx, sy;
   if(vr > sr){ sh = v.videoHeight; sw = sh*sr; sx = (v.videoWidth-sw)/2; sy = 0; }
   else { sw = v.videoWidth; sh = sw/sr; sx = 0; sy = (v.videoHeight-sh)/2; }
-  const c = document.createElement('canvas'); c.width = s.w; c.height = s.h;
-  const g = c.getContext('2d');
-  if(CFG.mirror){ g.translate(s.w,0); g.scale(-1,1); }
-  g.drawImage(v, sx,sy,sw,sh, 0,0,s.w,s.h);
-  return c;
+  g.save();
+  if(CFG.mirror){ g.translate(x+w, y); g.scale(-1,1); g.drawImage(v, sx,sy,sw,sh, 0,0,w,h); }
+  else g.drawImage(v, sx,sy,sw,sh, x,y,w,h);
+  g.restore();
+}
+// 배경 + 카메라 + 프레임 합성 (라이브 미리보기와 최종 저장이 동일한 함수)
+function render(g){
+  g.fillStyle = CFG.bgColor; g.fillRect(0,0,frameCanvas.width,frameCanvas.height);
+  const sl = slots[0]; drawVideo(g, sl.x, sl.y, sl.w, sl.h);
+  g.drawImage(frameCanvas, 0, 0);  // 프레임이 위에 덮임
+}
+// 실시간 미리보기: 프레임이 적용된 모습을 보면서 포즈 잡기
+let liveOn = false;
+function startLive(){
+  const c = $('live'), g = c.getContext('2d');
+  c.width = Math.round(frameCanvas.width/2); c.height = Math.round(frameCanvas.height/2); // 가볍게
+  g.scale(.5,.5);
+  liveOn = true;
+  (function loop(){ if(!liveOn) return; render(g); requestAnimationFrame(loop); })();
 }
 
 const sleep = ms => new Promise(r => setTimeout(r,ms));
 
 async function shoot(){
   if(busy) return; busy = true;
-  shots = []; document.querySelectorAll('#thumbs i').forEach(i => i.style.backgroundImage = '');
-  for(let n=0; n<N; n++){
-    for(let t=CFG.countdown; t>0; t--){ $('count').textContent = t; await sleep(1000); }
-    $('count').textContent = '';
-    const c = capture(); shots.push(c);
-    $('thumbs').children[n].style.backgroundImage = `url(${c.toDataURL('image/jpeg',.5)})`;
-    const f = $('flash'); f.style.transition='none'; f.style.opacity=.9; void f.offsetWidth;
-    f.style.transition='opacity .35s'; f.style.opacity=0;
-    await sleep(700);
-  }
-  await compose(); busy = false;
-}
-
-async function compose(){
+  for(let t=CFG.countdown; t>0; t--){ $('count').textContent = t; await sleep(1000); }
+  $('count').textContent = '';
+  // 풀 해상도로 최종 합성
   const c = document.createElement('canvas'); c.width = frameCanvas.width; c.height = frameCanvas.height;
-  const g = c.getContext('2d');
-  g.fillStyle = CFG.bgColor; g.fillRect(0,0,c.width,c.height);
-  shots.forEach((s,i) => { const sl = slots[i]; g.drawImage(s, sl.x, sl.y, sl.w, sl.h); });
-  g.drawImage(frameCanvas, 0, 0); // 프레임이 위에 덮임 (캐릭터가 사진 위로 올라옴)
+  render(c.getContext('2d'));
+  const f = $('flash'); f.style.transition='none'; f.style.opacity=.9; void f.offsetWidth;
+  f.style.transition='opacity .35s'; f.style.opacity=0;
   resultBlob = await new Promise(r => c.toBlob(r, 'image/png'));
   $('out').src = URL.createObjectURL(resultBlob);
-  show('res');
+  await sleep(400);
+  liveOn = false; show('res'); busy = false;
 }
 
 async function save(){
-  const file = new File([resultBlob], `life4cuts_${Date.now()}.png`, {type:'image/png'});
+  const file = new File([resultBlob], `photobooth_${Date.now()}.png`, {type:'image/png'});
   // 모바일: 공유 시트 → '이미지 저장' (iOS 사진앱에 바로 저장)
   if(navigator.canShare && navigator.canShare({files:[file]})){
     try{ await navigator.share({files:[file]}); return; }catch(e){ if(e.name==='AbortError') return; }
@@ -209,12 +197,11 @@ async function save(){
 $('start').onclick = async () => {
   try{ await loadFrame(); }catch(e){ $('msg0').textContent = e.message; return; }
   if(!(await openCam())) return;
-  show('cam'); drawGuide();
+  show('cam'); startLive();
 };
 $('shot').onclick = shoot;
 $('save').onclick = save;
-$('again').onclick = () => { shots=[]; document.querySelectorAll('#thumbs i').forEach(i=>i.style.backgroundImage=''); show('cam'); drawGuide(); };
-addEventListener('resize', () => $('cam').classList.contains('on') && drawGuide());
+$('again').onclick = () => { show('cam'); startLive(); };
 </script>
 </body>
 </html>
